@@ -234,7 +234,9 @@ void cd_defaults(obs_data_t *s)
 	obs_data_set_default_bool(s, "adapt", true);
 	obs_data_set_default_double(s, "adapt_tau_s", 4.0);
 	obs_data_set_default_double(s, "polarity_threshold", 0.45);
-	obs_data_set_default_int(s, "output_mode", 1);
+	/* Synesthesia (the only receiver) treats alpha as black, so black RGB is what reads as
+	 * transparent there: opaque output is the default; luma-to-alpha stays for other receivers */
+	obs_data_set_default_int(s, "output_mode", 0);
 	obs_data_set_default_double(s, "alpha_lo", 0.02);
 	obs_data_set_default_double(s, "alpha_hi", 0.20);
 }
