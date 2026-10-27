@@ -164,3 +164,15 @@ TEST_CASE("speed variation is quantised and in range; same seed, same sequence")
 	CHECK(extremes < 60);
 	CHECK(diff > 200);
 }
+
+TEST_CASE("unknown duration (raw clip, no ingest): playable, starts at 0, loops")
+{
+	std::vector<Clip> clips = make_clips(0, 3, 0.0, 0.0);
+	ClipPicker p({fold()}, clips, PickerConfig{});
+	for (int i = 0; i < 6; ++i) {
+		const Pick k = p.next(Section::Groove, 30.0);
+		REQUIRE(k.clip >= 0);
+		CHECK(k.inpoint == 0.0);
+		CHECK(k.loops);
+	}
+}

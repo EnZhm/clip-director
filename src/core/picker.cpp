@@ -84,13 +84,15 @@ bool ClipPicker::playable(int clip, double hold_s, double speed) const
 	if (clip < 0 || clip >= static_cast<int>(clips_.size()))
 		return false;
 	const Clip &c = clips_[clip];
-	if (c.banned || c.duration <= 0.0)
+	if (c.banned)
 		return false;
 	if (c.folder < 0 || c.folder >= static_cast<int>(folders_.size()))
 		return false;
 	const Folder &f = folders_[c.folder];
 	if (!f.enabled || f.weight <= 0.0)
 		return false;
+	if (c.duration <= 0.0) // unknown length (raw clip without ingest): playable, starts at 0, loops
+		return true;
 	const double content = hold_s * speed;
 	const double loops = content / c.duration - 1.0; // 0 = plays once without looping
 	return loops <= static_cast<double>(cfg_.max_loops) + 1e-9;
@@ -143,6 +145,8 @@ double ClipPicker::pick_speed()
 double ClipPicker::pick_inpoint(int clip, double hold_s, double speed)
 {
 	const Clip &c = clips_[clip];
+	if (c.duration <= 0.0)
+		return 0.0;
 	const double content = hold_s * speed;
 	const double max_start = c.duration - content;
 	if (max_start <= 0.0)
@@ -217,7 +221,7 @@ Pick ClipPicker::next(Section section, double hold_s)
 		p.clip = clip;
 		p.speed = speed;
 		p.inpoint = pick_inpoint(clip, hold_s, speed);
-		p.loops = hold_s * speed > clips_[clip].duration - p.inpoint + 1e-9;
+		p.loops = clips_[clip].duration <= 0.0 || hold_s * speed > clips_[clip].duration - p.inpoint + 1e-9;
 		char buf[160];
 		std::snprintf(buf, sizeof(buf), "%s pool, folder %d, %zu left in bag, in %.1fs, x%.2f%s",
 			      section_name(section), folder, bag_[folder].size(), p.inpoint, p.speed,

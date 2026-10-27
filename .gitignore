@@ -1,4 +1,5 @@
 build*/
+.deps
 .vs/
 *.user
 __pycache__/

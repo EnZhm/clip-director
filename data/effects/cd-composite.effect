@@ -1,0 +1,59 @@
+// Clip Director composite: two decks -> levels/polarity per deck -> crossfade / dip -> alpha.
+// All values are in the encoded (non-linear) range; the source draws with framebuffer sRGB off.
+uniform float4x4 ViewProj;
+uniform texture2d texA;
+uniform texture2d texB;
+uniform float mixB;        // 0 = A only, 1 = B only (crossfade progress)
+uniform float dip;         // 0..1, fade toward black (dip transition)
+uniform float4 lvA;        // levels A: lo, scale, gamma, strength
+uniform float invA;        // 1 = invert A
+uniform float4 lvB;
+uniform float invB;
+uniform float alphaMode;   // 0 = opaque, 1 = luma -> alpha
+uniform float2 alphaRange; // smoothstep(lo, hi, luma)
+
+sampler_state def {
+	Filter   = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData v_out;
+	v_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	v_out.uv  = v_in.uv;
+	return v_out;
+}
+
+float3 levels(float3 c, float4 lv, float inv)
+{
+	float3 y = inv > 0.5 ? 1.0 - c : c;
+	float3 n = pow(saturate((y - lv.x) * lv.y), lv.z);
+	return lerp(y, n, lv.w);
+}
+
+float4 PSDraw(VertData v_in) : TARGET
+{
+	float3 a = levels(texA.Sample(def, v_in.uv).rgb, lvA, invA);
+	float3 b = levels(texB.Sample(def, v_in.uv).rgb, lvB, invB);
+	float3 c = lerp(a, b, mixB) * (1.0 - dip);
+	if (alphaMode < 0.5)
+		return float4(c, 1.0);
+	float l = dot(c, float3(0.2126, 0.7152, 0.0722));
+	return float4(c, smoothstep(alphaRange.x, alphaRange.y, l));
+}
+
+technique Draw
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSDraw(v_in);
+	}
+}
