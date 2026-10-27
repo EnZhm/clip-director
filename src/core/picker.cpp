@@ -70,7 +70,8 @@ std::vector<int> ClipPicker::pool_folders(Section section) const
 	}
 	if (!tagged.empty()) {
 		if (section == Section::Groove)
-			tagged.insert(tagged.end(), any.begin(), any.end());
+			for (int f : any) // a loop, not insert(): gcc 13 -O2 flags a false -Wstringop-overflow
+				tagged.push_back(f);
 		std::sort(tagged.begin(), tagged.end());
 		return tagged;
 	}

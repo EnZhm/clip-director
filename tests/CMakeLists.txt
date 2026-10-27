@@ -18,7 +18,14 @@ else()
   target_compile_options(cd_core PRIVATE -Wall -Wextra -Werror)
 endif()
 
-add_executable(cd_core_tests doctest_main.cpp test_picker.cpp test_scheduler.cpp test_levels.cpp test_cyber_set.cpp)
+add_executable(
+  cd_core_tests
+  doctest_main.cpp
+  test_picker.cpp
+  test_scheduler.cpp
+  test_levels.cpp
+  test_cyber_set.cpp
+)
 target_include_directories(cd_core_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/doctest)
 target_link_libraries(cd_core_tests PRIVATE cd_core)
 add_test(NAME cd_core_tests COMMAND cd_core_tests)
