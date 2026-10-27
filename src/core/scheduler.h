@@ -40,7 +40,7 @@ struct SchedulerConfig {
 	SectionRule breakdown{8, Transition::Crossfade, 4.0, 0.0};
 	SectionRule drop{2, Transition::Cut, 1.0, 0.0};
 	bool cut_on_section_change = true;
-	bool stutter = true; // follow Palette Director's drop colour cycle
+	bool stutter = true;        // follow Palette Director's drop colour cycle
 	double preroll_beats = 1.0; // the OBS source defaults to 2 (deck loads take ~0.3-0.5 s)
 	uint32_t seed = 7;
 };
