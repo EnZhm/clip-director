@@ -1,0 +1,25 @@
+name: Core Tests
+run-name: ${{ github.event.pull_request.title || github.ref_name }} core tests 🧪
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [master, main]
+  push:
+    branches: [master, main]
+permissions:
+  contents: read
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.event.pull_request.head.label || github.head_ref || github.ref }}'
+  cancel-in-progress: true
+jobs:
+  core-tests:
+    name: Core Unit Tests 🧪
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (self-contained tests project)
+        run: cmake -S tests -B build-tests
+      - name: Build
+        run: cmake --build build-tests
+      - name: Run tests
+        run: ctest --test-dir build-tests --output-on-failure
