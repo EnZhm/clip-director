@@ -88,6 +88,20 @@ struct CdSource {
 
 	gs_effect_t *effect = nullptr;
 
+	/* live level measurement (P5): live deck -> 480x270 -> 120x68 box downsample -> staged
+	 * readback (two surfaces, mapped >= 3 frames later so the GPU never stalls) */
+	gs_effect_t *measure_fx = nullptr;
+	gs_texrender_t *m1 = nullptr, *m2 = nullptr;
+	gs_stagesurf_t *stage[2] = {nullptr, nullptr};
+	bool stage_full[2] = {false, false};
+	int stage_deck[2] = {-1, -1};
+	uint64_t stage_gen[2] = {0, 0};
+	uint64_t stage_frame[2] = {0, 0};
+	uint64_t frame = 0;
+	uint64_t last_obs_ns = 0;
+	uint64_t meas_n = 0;
+	double meas_ms_sum = 0.0, meas_ms_max = 0.0;
+
 	/* deck loader thread: obs_source_update on an ffmpeg_source re-opens the media (file open,
 	 * decoder init), far too slow for the graphics thread */
 	struct LoadJob {
@@ -403,6 +417,7 @@ void do_cut(CdSource *c, const cd::SchedEvent &e)
 	const double media_t = obs_source_media_get_time(c->decks[d].src) / 1000.0; /* before un-pausing */
 	obs_source_media_play_pause(c->decks[d].src, false);
 	c->decks[d].lv.reset(c->lib.clips[c->decks[d].clip], c->cfg.lc);
+	c->last_obs_ns = 0;
 	const bool fade = e.transition != cd::Transition::Cut && c->spare >= 0 && e.transition_beats > 0.0;
 	c->tr_active = fade;
 	c->tr_type = e.transition;
@@ -570,10 +585,18 @@ void *cd_create(obs_data_t *settings, obs_source_t *source)
 	c->self = source;
 	c->loader = std::thread(loader_main, c);
 	char *path = obs_module_file("effects/cd-composite.effect");
+	char *mpath = obs_module_file("effects/cd-measure.effect");
 	obs_enter_graphics();
 	char *err = nullptr;
 	c->effect = path ? gs_effect_create_from_file(path, &err) : nullptr;
+	char *merr = nullptr;
+	c->measure_fx = mpath ? gs_effect_create_from_file(mpath, &merr) : nullptr;
 	obs_leave_graphics();
+	if (!c->measure_fx)
+		obs_log(LOG_ERROR, "could not load effect %s: %s", mpath ? mpath : "(null)",
+			merr ? merr : "unknown error");
+	bfree(merr);
+	bfree(mpath);
 	if (!c->effect)
 		obs_log(LOG_ERROR, "could not load effect %s: %s", path ? path : "(null)", err ? err : "unknown error");
 	bfree(err);
@@ -598,6 +621,11 @@ void cd_destroy(void *data)
 	for (auto &d : c->decks)
 		gs_texrender_destroy(d.tr);
 	gs_effect_destroy(c->effect);
+	gs_effect_destroy(c->measure_fx);
+	gs_texrender_destroy(c->m1);
+	gs_texrender_destroy(c->m2);
+	gs_stagesurface_destroy(c->stage[0]);
+	gs_stagesurface_destroy(c->stage[1]);
 	obs_leave_graphics();
 	if (c->cut_err_n)
 		obs_log(LOG_INFO, "'%s': %llu cuts, frame error mean %.1f ms max %.1f ms", obs_source_get_name(c->self),
@@ -639,13 +667,19 @@ void cd_tick(void *data, float seconds)
 	c->stat_t += seconds;
 	if (c->stat_t >= 10.0 && c->cut_err_n) {
 		c->stat_t = 0.0;
+		cd::LevelParams lp;
+		if (c->live >= 0)
+			lp = c->decks[c->live].lv.params(c->cfg.lc);
 		obs_log(LOG_INFO,
 			"'%s': status %s bpm %.1f beat %.2f %s, %llu cuts, frame error mean %.1f ms max %.1f ms, "
-			"deck loads %d mean %.0f ms max %.0f ms (off the graphics thread), start-point retries %d, unconfirmed %d",
+			"deck loads %d mean %.0f ms max %.0f ms, start-point retries %d unconfirmed %d | levels: "
+			"%llu samples, measure mean %.3f ms max %.3f ms, live lo %.3f scale %.2f gamma %.2f str %.2f inv %d",
 			obs_source_get_name(c->self), c->clock_ok ? "PD" : "free", c->bpm, c->beats,
 			sec_name(c->section), (unsigned long long)c->cuts, c->cut_err_sum / c->cut_err_n,
 			c->cut_err_max, c->load_n, c->load_n ? c->load_ms_sum / c->load_n : 0.0, c->load_ms_max,
-			c->verify_retries, c->verify_fail);
+			c->verify_retries, c->verify_fail, (unsigned long long)c->meas_n,
+			c->meas_n ? c->meas_ms_sum / c->meas_n : 0.0, c->meas_ms_max, lp.lo, lp.scale, lp.gamma,
+			lp.strength, (int)lp.invert);
 	}
 }
 
@@ -686,6 +720,121 @@ void set_levels(gs_effect_t *e, const char *lv, const char *inv, const cd::Level
 	vec4_set(&v, (float)p.lo, (float)p.scale, (float)p.gamma, (float)p.strength);
 	gs_effect_set_vec4(gs_effect_get_param_by_name(e, lv), &v);
 	gs_effect_set_float(gs_effect_get_param_by_name(e, inv), p.invert ? 1.0f : 0.0f);
+}
+
+/* one box-downsample pass into `tr` (w x h) */
+bool box_pass(CdSource *c, gs_texrender_t *tr, gs_texture_t *src, uint32_t w, uint32_t h)
+{
+	const uint32_t sw = gs_texture_get_width(src), sh = gs_texture_get_height(src);
+	gs_texrender_reset(tr);
+	if (!gs_texrender_begin(tr, w, h))
+		return false;
+	gs_ortho(0.0f, (float)w, 0.0f, (float)h, -100.0f, 100.0f);
+	struct vec2 tx;
+	vec2_set(&tx, 1.0f / (float)sw, 1.0f / (float)sh);
+	gs_effect_set_texture(gs_effect_get_param_by_name(c->measure_fx, "image"), src);
+	gs_effect_set_vec2(gs_effect_get_param_by_name(c->measure_fx, "texel"), &tx);
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+	while (gs_effect_loop(c->measure_fx, "Box4"))
+		gs_draw_sprite(src, 0, w, h);
+	gs_blend_state_pop();
+	gs_texrender_end(tr);
+	return true;
+}
+
+/* luma percentiles of a mapped RGBA8 surface */
+cd::ClipStats stats_from(const uint8_t *data, uint32_t linesize, uint32_t w, uint32_t h)
+{
+	uint32_t hist[256] = {0};
+	double sum = 0.0;
+	for (uint32_t y = 0; y < h; ++y) {
+		const uint8_t *row = data + (size_t)y * linesize;
+		for (uint32_t x = 0; x < w; ++x) {
+			const uint8_t *p = row + x * 4;
+			const double l = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+			const int b = std::clamp((int)std::lround(l), 0, 255);
+			hist[b]++;
+			sum += l;
+		}
+	}
+	const uint32_t n = w * h;
+	auto pct = [&](double q) {
+		const uint32_t target = (uint32_t)(q * (n - 1));
+		uint32_t acc = 0;
+		for (int i = 0; i < 256; ++i) {
+			acc += hist[i];
+			if (acc > target)
+				return i / 255.0;
+		}
+		return 1.0;
+	};
+	cd::ClipStats st;
+	st.has = true;
+	st.mean = sum / n / 255.0;
+	st.p02 = pct(0.02);
+	st.p50 = pct(0.50);
+	st.p98 = pct(0.98);
+	return st;
+}
+
+constexpr uint32_t kM1W = 480, kM1H = 270, kM2W = 120, kM2H = 68;
+
+/* graphics thread, mx held, framebuffer sRGB off. `live_tex` = this frame's live deck texture. */
+void measure_step(CdSource *c, gs_texture_t *live_tex)
+{
+	if (!c->measure_fx)
+		return;
+	const uint64_t t0 = os_gettime_ns();
+	c->frame++;
+	bool worked = false;
+	/* 1. collect staged samples that are old enough not to stall */
+	for (int k = 0; k < 2; ++k) {
+		if (!c->stage_full[k] || c->frame - c->stage_frame[k] < 3)
+			continue;
+		uint8_t *data = nullptr;
+		uint32_t ls = 0;
+		if (gs_stagesurface_map(c->stage[k], &data, &ls)) {
+			const cd::ClipStats st = stats_from(data, ls, kM2W, kM2H);
+			gs_stagesurface_unmap(c->stage[k]);
+			const int d = c->stage_deck[k];
+			if (d >= 0 && d == c->live && c->decks[d].gen == c->stage_gen[k]) {
+				const uint64_t now = os_gettime_ns();
+				const double dt = c->last_obs_ns ? std::min(1.0, (now - c->last_obs_ns) / 1e9) : 0.1;
+				c->last_obs_ns = now;
+				c->decks[d].lv.observe(st, dt, c->cfg.lc);
+				c->meas_n++;
+			}
+		}
+		c->stage_full[k] = false;
+		worked = true;
+	}
+	/* 2. every 6th frame (10 Hz at 60 fps): downsample the live deck and stage it */
+	if (live_tex && c->live >= 0 && c->frame % 6 == 0) {
+		int k = !c->stage_full[0] ? 0 : (!c->stage_full[1] ? 1 : -1);
+		if (k >= 0) {
+			if (!c->m1)
+				c->m1 = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+			if (!c->m2)
+				c->m2 = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+			if (!c->stage[k])
+				c->stage[k] = gs_stagesurface_create(kM2W, kM2H, GS_RGBA);
+			if (c->stage[k] && box_pass(c, c->m1, live_tex, kM1W, kM1H) &&
+			    box_pass(c, c->m2, gs_texrender_get_texture(c->m1), kM2W, kM2H)) {
+				gs_stage_texture(c->stage[k], gs_texrender_get_texture(c->m2));
+				c->stage_full[k] = true;
+				c->stage_deck[k] = c->live;
+				c->stage_gen[k] = c->decks[c->live].gen;
+				c->stage_frame[k] = c->frame;
+				worked = true;
+			}
+		}
+	}
+	if (worked) {
+		const double ms = (os_gettime_ns() - t0) / 1e6;
+		c->meas_ms_sum += ms;
+		c->meas_ms_max = std::max(c->meas_ms_max, ms);
+	}
 }
 
 void cd_render(void *data, gs_effect_t *)
@@ -729,6 +878,7 @@ void cd_render(void *data, gs_effect_t *)
 		gs_effect_set_vec2(gs_effect_get_param_by_name(e, "alphaRange"), &ar);
 		while (gs_effect_loop(e, "Draw"))
 			gs_draw_sprite(ta, 0, kW, kH);
+		measure_step(c, a == c->live ? ta : (b == c->live ? tb : nullptr));
 	}
 	gs_enable_framebuffer_srgb(prev_srgb);
 }

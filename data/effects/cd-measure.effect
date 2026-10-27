@@ -1,0 +1,42 @@
+// Clip Director: box downsample for live level measurement (each output pixel = mean of a 4x4 block).
+uniform float4x4 ViewProj;
+uniform texture2d image;
+uniform float2 texel; // 1 / input size
+
+sampler_state def {
+	Filter   = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData v_out;
+	v_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	v_out.uv  = v_in.uv;
+	return v_out;
+}
+
+float4 PSBox4(VertData v_in) : TARGET
+{
+	// 4 bilinear taps at +-1 texel each average a 2x2 block: together exactly the 4x4 footprint
+	float3 c = image.Sample(def, v_in.uv + texel * float2(-1.0, -1.0)).rgb;
+	c += image.Sample(def, v_in.uv + texel * float2(1.0, -1.0)).rgb;
+	c += image.Sample(def, v_in.uv + texel * float2(-1.0, 1.0)).rgb;
+	c += image.Sample(def, v_in.uv + texel * float2(1.0, 1.0)).rgb;
+	return float4(c * 0.25, 1.0);
+}
+
+technique Box4
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSBox4(v_in);
+	}
+}
