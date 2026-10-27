@@ -18,6 +18,9 @@ restarts its media), seeking to the start point and pausing; a cut un-pauses it.
 #include <plugin-support.h>
 
 #include <algorithm>
+#include <condition_variable>
+#include <deque>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -43,7 +46,9 @@ struct Deck {
 	int clip = -1;
 	double inpoint = 0.0, speed = 1.0;
 	bool loops = false;
-	uint64_t load_ns = 0;
+	uint64_t load_ns = 0; /* when the load finished (ready) */
+	uint64_t gen = 0;     /* bumps on every queued load; stale completions are ignored */
+	bool ready = false;   /* load done: file open, seeked, paused */
 	gs_texrender_t *tr = nullptr;
 	cd::LevelTracker lv;
 };
@@ -82,6 +87,29 @@ struct CdSource {
 	cd::Section section = cd::Section::Groove;
 
 	gs_effect_t *effect = nullptr;
+
+	/* deck loader thread: obs_source_update on an ffmpeg_source re-opens the media (file open,
+	 * decoder init), far too slow for the graphics thread */
+	struct LoadJob {
+		int deck;
+		uint64_t gen;
+		std::string path;
+		double inpoint, speed;
+		uint64_t queued_ns;
+	};
+	std::thread loader;
+	std::mutex lq_mx;
+	std::condition_variable lq_cv;
+	std::deque<LoadJob> lq;
+	bool lq_stop = false;
+	double load_ms_sum = 0.0, load_ms_max = 0.0;
+	int verify_retries = 0, verify_fail = 0;
+	int load_n = 0;
+
+	/* a cut whose deck is still loading waits here (fires on the first frame the deck is ready) */
+	bool deferred = false;
+	cd::SchedEvent deferred_ev;
+
 	uint64_t cuts = 0;
 	double stat_t = 0.0;
 	double cut_err_sum = 0.0, cut_err_max = 0.0;
@@ -172,7 +200,7 @@ void cd_defaults(obs_data_t *s)
 	obs_data_set_default_int(s, "speed_min_pct", 100);
 	obs_data_set_default_int(s, "speed_max_pct", 100);
 	obs_data_set_default_double(s, "speed_extreme_chance", 0.0);
-	obs_data_set_default_double(s, "preroll_beats", 1.0);
+	obs_data_set_default_double(s, "preroll_beats", 2.0);
 	obs_data_set_default_bool(s, "stutter", true);
 	obs_data_set_default_int(s, "groove_hold_bars", 4);
 	obs_data_set_default_int(s, "groove_transition", 0);
@@ -200,33 +228,133 @@ void cd_defaults(obs_data_t *s)
 /* ------------------------------------------------------------------------- */
 /* decks                                                                     */
 
-void deck_load(CdSource *c, int d, const cd::Pick &p)
+/* worker side (no CdSource::mx held). libobs defers obs_source_update() of video sources to the
+ * graphics thread, so re-pointing an existing ffmpeg_source would re-open its media there. Instead
+ * each load creates a fresh private ffmpeg_source here (create runs its update directly), seeks and
+ * pauses that new media, and hands it to the deck. */
+obs_source_t *deck_create(int deck, const std::string &path, double inpoint, double speed, int *attempts,
+			  double *err_ms)
 {
-	Deck &k = c->decks[d];
-	const cd::Clip &clip = c->lib.clips[p.clip];
 	obs_data_t *s = obs_data_create();
 	obs_data_set_bool(s, "is_local_file", true);
-	obs_data_set_string(s, "local_file", clip.path.c_str());
+	obs_data_set_string(s, "local_file", path.c_str());
 	obs_data_set_bool(s, "looping", true);
 	obs_data_set_bool(s, "restart_on_activate", false);
 	obs_data_set_bool(s, "close_when_inactive", false);
 	obs_data_set_bool(s, "clear_on_media_end", false);
 	obs_data_set_bool(s, "hw_decode", true);
 	obs_data_set_bool(s, "log_changes", false);
-	obs_data_set_int(s, "speed_percent", std::clamp((int)std::lround(p.speed * 100.0), 1, 200));
-	/* force a media restart even when the same file is loaded again (new start point) */
-	obs_data_set_string(s, "local_file", "");
-	obs_source_update(k.src, s);
-	obs_data_set_string(s, "local_file", clip.path.c_str());
-	obs_source_update(k.src, s);
+	obs_data_set_int(s, "speed_percent", std::clamp((int)std::lround(speed * 100.0), 1, 200));
+	char nm[64];
+	snprintf(nm, sizeof(nm), "clip-director deck %d", deck);
+	obs_source_t *src = obs_source_create_private("ffmpeg_source", nm, s);
 	obs_data_release(s);
-	obs_source_media_set_time(k.src, (int64_t)std::llround(p.inpoint * 1000.0));
-	obs_source_media_play_pause(k.src, true);
+	if (!src)
+		return nullptr;
+	obs_source_inc_active(src);
+	obs_source_inc_showing(src);
+
+	/* The media thread opens the file asynchronously and its reset (mp_media_reset) clears any
+	 * pause and seeks to 0 once the open completes. So: wait for the open, then seek + pause,
+	 * then verify the media time is frozen at the start point; re-issue if it is not. */
+	const int64_t target = (int64_t)std::llround(inpoint * 1000.0);
+	for (int i = 0; i < 300 && obs_source_media_get_duration(src) <= 0; ++i)
+		os_sleep_ms(10);
+	/* ...and until it is actually playing (time > 0): only then has the reset run, so a start
+	 * point of 0 cannot pass the check below before the reset un-pauses it again */
+	for (int i = 0; i < 150 && obs_source_media_get_time(src) <= 0; ++i)
+		os_sleep_ms(10);
+	*attempts = 0;
+	*err_ms = 1e9;
+	for (int a = 1; a <= 5; ++a) {
+		*attempts = a;
+		obs_source_media_set_time(src, target);
+		obs_source_media_play_pause(src, true);
+		os_sleep_ms(60);
+		const int64_t t1 = obs_source_media_get_time(src);
+		os_sleep_ms(40);
+		const int64_t t2 = obs_source_media_get_time(src);
+		*err_ms = (double)(t2 - target);
+		if (std::llabs(t2 - t1) < 20 && std::llabs(t2 - target) < 300)
+			break;
+	}
+	return src;
+}
+
+void deck_release(obs_source_t *src)
+{
+	if (!src)
+		return;
+	obs_source_dec_showing(src);
+	obs_source_dec_active(src);
+	obs_source_release(src);
+}
+
+void loader_main(CdSource *c)
+{
+	for (;;) {
+		CdSource::LoadJob j;
+		{
+			std::unique_lock<std::mutex> lk(c->lq_mx);
+			c->lq_cv.wait(lk, [c] { return c->lq_stop || !c->lq.empty(); });
+			if (c->lq_stop)
+				return;
+			j = c->lq.front();
+			c->lq.pop_front();
+		}
+		{ /* superseded by a newer load for the same deck: skip the slow part */
+			std::lock_guard<std::mutex> g(c->mx);
+			if (c->decks[j.deck].gen != j.gen)
+				continue;
+		}
+		const uint64_t t0 = os_gettime_ns();
+		int attempts = 0;
+		double verr = 0.0;
+		obs_source_t *fresh = deck_create(j.deck, j.path, j.inpoint, j.speed, &attempts, &verr);
+		const uint64_t t1 = os_gettime_ns();
+		obs_source_t *old = nullptr;
+		{
+			std::lock_guard<std::mutex> g(c->mx);
+			Deck &k = c->decks[j.deck];
+			if (k.gen != j.gen || !fresh) {
+				old = fresh; /* superseded meanwhile: discard */
+			} else {
+				old = k.src; /* not live/spare (it was a free deck), so nothing renders it */
+				k.src = fresh;
+				k.ready = true;
+				k.load_ns = t1;
+				const double ms = (t1 - t0) / 1e6;
+				c->load_ms_sum += ms;
+				c->load_ms_max = std::max(c->load_ms_max, ms);
+				c->load_n++;
+				c->verify_retries += attempts - 1;
+				if (std::fabs(verr) >= 300.0) {
+					c->verify_fail++;
+					obs_log(LOG_WARNING,
+						"deck %d: start point not confirmed after %d tries (%+.0f ms)", j.deck,
+						attempts, verr);
+				}
+			}
+		}
+		deck_release(old);
+	}
+}
+
+/* graphics thread (mx held): record the pick and queue the slow part */
+void deck_load(CdSource *c, int d, const cd::Pick &p)
+{
+	Deck &k = c->decks[d];
 	k.clip = p.clip;
 	k.inpoint = p.inpoint;
 	k.speed = p.speed;
 	k.loops = p.loops;
-	k.load_ns = os_gettime_ns();
+	k.ready = false;
+	k.gen++;
+	{
+		std::lock_guard<std::mutex> lk(c->lq_mx);
+		c->lq.push_back({d, k.gen, c->lib.clips[p.clip].path, p.inpoint, p.speed, os_gettime_ns()});
+	}
+	c->lq_cv.notify_one();
 }
 
 void deck_pause(CdSource *c, int d)
@@ -259,6 +387,43 @@ const char *clip_name(CdSource *c, int clip)
 /* ------------------------------------------------------------------------- */
 /* scheduler events                                                           */
 
+void do_cut(CdSource *c, const cd::SchedEvent &e)
+{
+	const int d = c->slot_deck[e.slot];
+	if (d < 0) {
+		obs_log(LOG_WARNING, "'%s': cut at beat %.2f but slot %d is empty", obs_source_get_name(c->self),
+			e.at_beat, e.slot);
+		return;
+	}
+	c->slot_deck[e.slot] = -1;
+	if (c->spare >= 0 && c->spare != d)
+		deck_pause(c, c->spare);
+	c->spare = c->live;
+	c->live = d;
+	const double media_t = obs_source_media_get_time(c->decks[d].src) / 1000.0; /* before un-pausing */
+	obs_source_media_play_pause(c->decks[d].src, false);
+	c->decks[d].lv.reset(c->lib.clips[c->decks[d].clip], c->cfg.lc);
+	const bool fade = e.transition != cd::Transition::Cut && c->spare >= 0 && e.transition_beats > 0.0;
+	c->tr_active = fade;
+	c->tr_type = e.transition;
+	c->tr_start = e.at_beat;
+	c->tr_len = e.transition_beats;
+	c->show_prev = false;
+	c->cuts++;
+	const double err_ms = (c->beats - e.at_beat) * 60000.0 / std::max(1.0, c->bpm);
+	c->cut_err_sum += std::fabs(err_ms);
+	c->cut_err_max = std::max(c->cut_err_max, std::fabs(err_ms));
+	c->cut_err_n++;
+	const double ready_s = (os_gettime_ns() - c->decks[d].load_ns) / 1e9;
+	obs_log(LOG_INFO,
+		"'%s': CUT #%llu slot %d deck %d '%s' target beat %.3f frame beat %.3f err %+.1f ms %s %.2f "
+		"(ready %.2fs before) in %.1fs (media at %.2fs) x%.2f%s%s inv %d",
+		obs_source_get_name(c->self), (unsigned long long)c->cuts, e.slot, d, clip_name(c, c->decks[d].clip),
+		e.at_beat, c->beats, err_ms, tr_name(e.transition), e.transition_beats, ready_s, c->decks[d].inpoint,
+		media_t, c->decks[d].speed, c->decks[d].loops ? " loops" : "",
+		c->deferred ? " LATE-PREROLL (deck was still loading)" : "", (int)c->decks[d].lv.invert());
+}
+
 void on_event(CdSource *c, const cd::SchedEvent &e)
 {
 	using T = cd::SchedEvent::Type;
@@ -289,33 +454,12 @@ void on_event(CdSource *c, const cd::SchedEvent &e)
 				obs_source_get_name(c->self), e.at_beat, e.slot);
 			return;
 		}
-		c->slot_deck[e.slot] = -1;
-		if (c->spare >= 0 && c->spare != d)
-			deck_pause(c, c->spare);
-		c->spare = c->live;
-		c->live = d;
-		obs_source_media_play_pause(c->decks[d].src, false);
-		c->decks[d].lv.reset(c->lib.clips[c->decks[d].clip], c->cfg.lc);
-		const bool fade = e.transition != cd::Transition::Cut && c->spare >= 0 && e.transition_beats > 0.0;
-		c->tr_active = fade;
-		c->tr_type = e.transition;
-		c->tr_start = e.at_beat;
-		c->tr_len = e.transition_beats;
-		c->show_prev = false;
-		c->cuts++;
-		const double err_ms = (c->beats - e.at_beat) * 60000.0 / std::max(1.0, c->bpm);
-		c->cut_err_sum += std::fabs(err_ms);
-		c->cut_err_max = std::max(c->cut_err_max, std::fabs(err_ms));
-		c->cut_err_n++;
-		const double ready_s = (os_gettime_ns() - c->decks[d].load_ns) / 1e9;
-		obs_log(LOG_INFO,
-			"'%s': CUT #%llu slot %d deck %d '%s' target beat %.3f frame beat %.3f err %+.1f ms %s %.2f "
-			"(prepared %.2fs before) in %.1fs x%.2f%s%s inv %d",
-			obs_source_get_name(c->self), (unsigned long long)c->cuts, e.slot, d,
-			clip_name(c, c->decks[d].clip), e.at_beat, c->beats, err_ms, tr_name(e.transition),
-			e.transition_beats, ready_s, c->decks[d].inpoint, c->decks[d].speed,
-			c->decks[d].loops ? " loops" : "", ready_s < 0.3 ? " LATE-PREROLL" : "",
-			(int)c->decks[d].lv.invert());
+		if (!c->decks[d].ready) {
+			c->deferred = true;
+			c->deferred_ev = e;
+			return;
+		}
+		do_cut(c, e);
 		break;
 	}
 	case T::StutterOn:
@@ -424,20 +568,7 @@ void *cd_create(obs_data_t *settings, obs_source_t *source)
 {
 	CdSource *c = new CdSource();
 	c->self = source;
-	for (int i = 0; i < kDecks; ++i) {
-		char nm[64];
-		snprintf(nm, sizeof(nm), "clip-director deck %d", i);
-		obs_data_t *s = obs_data_create();
-		obs_data_set_bool(s, "is_local_file", true);
-		obs_data_set_bool(s, "restart_on_activate", false);
-		obs_data_set_bool(s, "log_changes", false);
-		c->decks[i].src = obs_source_create_private("ffmpeg_source", nm, s);
-		obs_data_release(s);
-		if (c->decks[i].src) {
-			obs_source_inc_active(c->decks[i].src);
-			obs_source_inc_showing(c->decks[i].src);
-		}
-	}
+	c->loader = std::thread(loader_main, c);
 	char *path = obs_module_file("effects/cd-composite.effect");
 	obs_enter_graphics();
 	char *err = nullptr;
@@ -454,13 +585,15 @@ void *cd_create(obs_data_t *settings, obs_source_t *source)
 void cd_destroy(void *data)
 {
 	CdSource *c = static_cast<CdSource *>(data);
-	for (auto &d : c->decks) {
-		if (d.src) {
-			obs_source_dec_showing(d.src);
-			obs_source_dec_active(d.src);
-			obs_source_release(d.src);
-		}
+	{
+		std::lock_guard<std::mutex> lk(c->lq_mx);
+		c->lq_stop = true;
 	}
+	c->lq_cv.notify_all();
+	if (c->loader.joinable())
+		c->loader.join();
+	for (auto &d : c->decks)
+		deck_release(d.src);
 	obs_enter_graphics();
 	for (auto &d : c->decks)
 		gs_texrender_destroy(d.tr);
@@ -492,16 +625,27 @@ void cd_tick(void *data, float seconds)
 	read_clock(c, seconds, clk);
 	for (const auto &e : c->sched->tick(clk))
 		on_event(c, e);
+	if (c->deferred) {
+		const int d = c->slot_deck[c->deferred_ev.slot];
+		if (d < 0) {
+			c->deferred = false;
+		} else if (c->decks[d].ready) {
+			do_cut(c, c->deferred_ev);
+			c->deferred = false;
+		}
+	}
 	if (c->tr_active && c->beats >= c->tr_start + c->tr_len)
 		c->tr_active = false;
 	c->stat_t += seconds;
 	if (c->stat_t >= 10.0 && c->cut_err_n) {
 		c->stat_t = 0.0;
 		obs_log(LOG_INFO,
-			"'%s': status %s bpm %.1f beat %.2f %s, %llu cuts, frame error mean %.1f ms max %.1f ms",
+			"'%s': status %s bpm %.1f beat %.2f %s, %llu cuts, frame error mean %.1f ms max %.1f ms, "
+			"deck loads %d mean %.0f ms max %.0f ms (off the graphics thread), start-point retries %d, unconfirmed %d",
 			obs_source_get_name(c->self), c->clock_ok ? "PD" : "free", c->bpm, c->beats,
 			sec_name(c->section), (unsigned long long)c->cuts, c->cut_err_sum / c->cut_err_n,
-			c->cut_err_max);
+			c->cut_err_max, c->load_n, c->load_n ? c->load_ms_sum / c->load_n : 0.0, c->load_ms_max,
+			c->verify_retries, c->verify_fail);
 	}
 }
 
