@@ -69,6 +69,9 @@ bool load_index(const std::string &cd_dir, int folder, Library &lib)
 				std::string nm = file;
 				const size_t dot = nm.rfind('.');
 				lib.names.push_back(dot == std::string::npos ? nm : nm.substr(0, dot));
+				const char *th = obs_data_get_string(e, "thumb");
+				const std::string thp = *th ? join(join(cd_dir, ".clipdirector"), th) : std::string();
+				lib.thumbs.push_back(!thp.empty() && os_file_exists(thp.c_str()) ? thp : std::string());
 				n++;
 			}
 			obs_data_release(e);
@@ -101,6 +104,7 @@ void scan_raw(const std::string &dir, int folder, Library &lib)
 			lib.clips.push_back(c);
 			const size_t dot = f.rfind('.');
 			lib.names.push_back(dot == std::string::npos ? f : f.substr(0, dot));
+			lib.thumbs.emplace_back();
 			n++;
 		}
 	}
