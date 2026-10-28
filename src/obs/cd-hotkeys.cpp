@@ -41,8 +41,16 @@ std::string registerer_name_of(const obs_hotkey_t *key)
 {
 	if (obs_hotkey_get_registerer_type(key) != OBS_HOTKEY_REGISTERER_SOURCE)
 		return std::string();
-	auto *source = static_cast<obs_source_t *>(obs_hotkey_get_registerer(key));
-	return source ? text(obs_source_get_name(source)) : std::string();
+	/* libobs registers a source hotkey with a WEAK reference as its registerer (obs-hotkey.c,
+	 * obs_hotkey_register_source), so take a strong ref for the name, as OBS's own hotkey
+	 * settings do. Reading it as an obs_source_t crashed OBS when the MIDI dock listed hotkeys. */
+	auto *weak = static_cast<obs_weak_source_t *>(obs_hotkey_get_registerer(key));
+	obs_source_t *source = weak ? obs_weak_source_get_source(weak) : nullptr;
+	if (!source)
+		return std::string();
+	std::string name = text(obs_source_get_name(source));
+	obs_source_release(source);
+	return name;
 }
 
 bool collect(void *data, obs_hotkey_id, obs_hotkey_t *key)
