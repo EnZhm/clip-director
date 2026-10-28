@@ -85,7 +85,10 @@ cuts cleanly and measures every clip's brightness:
 
 4. The Clip Director dock
 -------------------------
-Docks menu > "Clip Director".
+Docks menu > "Clip Director". Two tabs: "Clips" (the top strip, now
+playing / next, Skip / Hold / Ban, the clip folders and the log) and
+"Synesthesia" (section 5). The top strip and the footer are on the Clips
+tab.
 - Top: the source, the clock (PD = following Palette Director, free = not),
   the section (GROOVE / BREAKDOWN / DROP) and four beat lights, and when the
   next cut comes.
@@ -110,9 +113,6 @@ Docks menu > "Clip Director".
   far and the average cut timing error.
 All of this is saved with the scene collection.
 
-<!-- TODO(verify): 1.1.0 dock tab layout (Now / Folders / Synesthesia / Log)
-     and whether the top strip and footer are shared across the tabs -->
-
 
 5. Synesthesia scenes over OSC
 ------------------------------
@@ -120,10 +120,13 @@ Synesthesia must have a Pro licence and OSC enabled. In Synesthesia, open
 Settings > OSC and note the port numbers; the host, the send port and the
 feedback port in the Clip Director dock > Synesthesia tab must match them
 (localhost is fine when OBS and Synesthesia are on the same machine).
+Defaults: host 127.0.0.1, send port 7000, feedback port 7001.
 
-- Auto ON / OFF and the link chip: the chip turns green once Synesthesia
-  echoes a launch back on the feedback port. Amber means messages are going
-  out but nothing is coming back: check the ports.
+- Auto ON / OFF and the link chip: Auto is OFF by default. The chip reads
+  "OSC off" (control disabled), "OSC sending" (amber: messages going out
+  but nothing coming back), "OSC linked" (green: Synesthesia echoed a
+  launch in the last 10 s) or "OSC error" (the socket did not open). Amber
+  usually means the feedback port does not match.
 - Now / next scene, Next scene, Hold scene, Fire bang 1: manual control.
   Hold suspends automatic launches, exactly as Hold does for clips.
 - When to switch: breakdown start launches from the Breakdown pool, the drop
@@ -158,30 +161,37 @@ drop cycle ends.
 
 The settings live with the Clip Director source in the scene collection.
 
-<!-- TODO(verify): default send/feedback ports, exact link-chip states and
-     the OSC log line format at 1.1.0 -->
+The Log lists every message with its beat position and reason, one per
+line:
+    123.45  -> /scenes/tunnel "acid"  [drop downbeat]
+    123.45  <- /scenes/tunnel
+"->" is a message going out, "<-" an echo from Synesthesia; an early
+launch carries "(+N ms early)", a refused message "[NOT SENT]".
 
 
 6. MIDI Director
 ----------------
 Docks menu > "MIDI Director". It maps a MIDI note or control change from a
 controller to an OBS hotkey in the suite.
-- Device: pick the MIDI input, with a light that flashes on incoming
-  messages.
-- Learn: press Learn, press the button you want to map, then move the control
-  on the controller (for a CC you are asked to move it through its range).
-- Mapping table: control, action and range, one table per scene collection.
-- Targets: Palette Director (palette 1-16, previous / next, Force on / off,
-  PANIC, Coverage on a CC), Music (Phrase is now, Drop now, Force breakdown,
-  tap tempo), Clip Director (Skip, Hold, Ban, stutter on / off), Synesthesia
-  (Next scene, Hold scene, pool slot N, meta brightness / hue over OSC).
-- Monitor: the last MIDI message received, for checking that the controller
-  is seen at all.
+- Device: pick the MIDI input, with a Rescan button and a light that
+  flashes on incoming messages.
+- Learn: pick the hotkey in the searchable list, choose the mode (press /
+  release or toggle), press Learn (the button becomes Cancel: it arms and
+  waits), then move a control. The first press binds it; there is no
+  popup.
+- Mapping table: control, target and mode, with a Remove button per row;
+  saved with the scene collection.
+- Hotkey list: every hotkey OBS knows about (frontend, source and so on),
+  searchable by name or description. It includes the suite's own: Palette
+  Director (Force off / on, Pause, Rotate colours, PANIC, next / previous
+  palette, palette 1-8 go live) and the Music clock commands (Phrase is
+  now, Drop now, Force breakdown, Tap tempo, Lock BPM, Nudge back /
+  forward); Clip Director (Skip, Hold, Ban); Synesthesia (next scene, hold
+  scene, fire bang 1).
+- Monitor: the last MIDI message received, with a count and a short
+  history.
 Windows MIDI needs no extra driver or library. Mappings are saved with the
 scene collection.
-
-<!-- TODO(verify): exact MIDI Director dock wording, and whether Learn arms a
-     popup or a listening state -->
 
 
 7. How it cuts

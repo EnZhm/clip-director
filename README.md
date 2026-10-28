@@ -77,7 +77,9 @@ python tools\cd-ingest.py "D:\Clips\groove"
 
 ## The Clip Director dock
 
-Open it from Docks > "Clip Director".
+Open it from Docks > "Clip Director". The dock has two tabs: **Clips** (the source, what is
+playing and next, Skip / Hold / Ban, the clip folders, the log and the footer) and
+**Synesthesia** (OSC scene control). The top strip and the footer belong to the Clips tab.
 
 | Area | Contents |
 |---|---|
@@ -95,24 +97,22 @@ folder carries `Breakdown` or `Drop`, that section plays only folders with that 
 folder whose name contains "breakdown", "drop" or "groove" starts with that tag. All of
 this is saved with the scene collection.
 
-<!-- TODO(verify): 1.1.0 dock tab layout (Now / Folders / Synesthesia / Log) and whether the top strip is shared across tabs -->
-
 ## Synesthesia scene control (OSC)
 
-Synesthesia must have a **Pro** licence, and OSC must be enabled in its Settings > OSC.
-The host and the send and feedback ports in the Synesthesia tab must match those settings;
-the defaults are `127.0.0.1` with a send port and a feedback port.
+Synesthesia must have a **Pro** licence, and OSC must be enabled. The host and the send and
+feedback ports in the Synesthesia tab must match the ports set in Synesthesia; the defaults
+are host `127.0.0.1`, send port `7000` and feedback port `7001`.
 
 | Control | Behaviour |
 |---|---|
-| Auto ON/OFF, link chip | The chip turns green once Synesthesia echoes a launch on the feedback port; amber = sending, no echo yet |
+| Auto ON/OFF, link chip | Auto OFF by default. The chip reads `OSC off` (control disabled), `OSC sending` (amber: messages going out, no echo yet), `OSC linked` (green: Synesthesia echoed a launch in the last 10 s) or `OSC error` (the socket did not open) |
 | Host / send port / feedback port | Must match Synesthesia Settings > OSC |
 | Now / next scene | From the pools below |
 | Next scene, Hold scene, Fire bang 1 | Manual. Hold suspends automatic launches (as Hold does for clips) |
 | Breakdown starts | Launch from the Breakdown pool, or do nothing |
 | Drop downbeat | Launch from the Drop pool, or do nothing; optionally also fire scene bang 1 |
 | During groove | Never, every 2 phrases or every 4 phrases, on the phrase downbeat |
-| Scene lead (0-500 ms) | Sends early to hide Synesthesia's scene-load time |
+| Scene lead (0-500 ms) | Sends the launch early to hide Synesthesia's scene-load time (default 0; groove launches and "Drop now" only) <!-- scene-lead-default --> |
 | Scene pools (Groove / Breakdown / Drop) | Scene plus an optional preset; add, remove, reorder, double-click to launch; shuffle bag per pool, same rule as clips |
 | Import from Synesthesia | Fills the scene names from Synesthesia's OSC output |
 | Log | Every OSC message with its beat position and reason |
@@ -135,7 +135,15 @@ than predicted, so the scene lead applies only to phrase-aligned groove launches
 The settings are stored with the Clip Director source (`syn_*` keys) in the scene
 collection.
 
-<!-- TODO(verify): default ports, the exact link-chip states, and the OSC log line format in 1.1.0 -->
+The **Log** lists every OSC message with its beat position and reason, one per line:
+
+```
+ 123.45  -> /scenes/tunnel "acid"  [drop downbeat]
+ 123.45  <- /scenes/tunnel
+```
+
+`->` is a message going out, `<-` an echo from Synesthesia; a launch sent early carries
+`(+N ms early)`, and a message the socket refused is tagged `[NOT SENT]`.
 
 ## The MIDI Director dock
 
@@ -144,30 +152,25 @@ to an OBS hotkey in the suite.
 
 | Area | Contents |
 |---|---|
-| Device | Device picker and an activity light that flashes on incoming MIDI |
-| Learn | Press Learn, press the button to map (or hold it for a CC), then move the control |
-| Mapping table | Control, action, range; one table per scene collection |
-| Monitor | The last MIDI message received |
+| Device | Device picker, a Rescan button and an activity light that flashes on incoming MIDI |
+| Learn | Pick the hotkey in the searchable list, choose the mode (press / release or toggle), press Learn to arm it, then move a control; the first press binds it |
+| Mapping table | Control, target and mode, with a Remove button per row; saved with the scene collection |
+| Monitor | The last MIDI message received, with a counter and a short history |
 
-Targets:
-
-| Group | Actions |
-|---|---|
-| Palette Director | Palette 1-16, previous / next, Force on / off, PANIC, Coverage (CC) |
-| Music | Phrase is now, Drop now, Force breakdown, tap tempo |
-| Clip Director | Skip, Hold, Ban, stutter on / off |
-| Synesthesia | Next scene, Hold scene, pool slot N, meta brightness / hue (CC, sent to Synesthesia as OSC) |
+The list is every hotkey OBS knows about (frontend, source, output, encoder and service),
+searchable by description or name. The suite's own hotkeys are in it: Palette Director
+(Force off / on, Pause, Rotate colours, PANIC, Next / Previous palette, Palette 1-8 go
+live) and its Music clock commands (Phrase is now, Drop now, Force breakdown, Tap tempo,
+Lock BPM, Nudge back / forward); Clip Director (Skip, Hold, Ban) and Synesthesia (next
+scene, hold scene, fire bang 1). Bind any of them to a MIDI note or CC.
 
 Windows MIDI is read through WinMM, so there is no extra dependency to install. Mappings
 are saved with the scene collection.
 
-<!-- TODO(verify): exact MIDI Director dock labels, whether Learn uses a popup or an armed state, and how the mapping table is saved -->
-
 ## Build from source
 
-The project is an [OBS plugin template](https://github.com/obsproject/obs-plugintemplate)
-layout: `buildspec.json` names the plugin, its version and the dependency versions, and
-`CMakePresets.json` holds the presets.
+The project is an OBS plugin template layout: `buildspec.json` names the plugin, its
+version and the dependency versions, and `CMakePresets.json` holds the presets.
 
 | Requirement | Version |
 |---|---|
