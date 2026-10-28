@@ -19,16 +19,20 @@ restarts its media), seeking to the start point and pausing; a cut un-pauses it.
 
 #include <algorithm>
 #include <condition_variable>
+#include <cstdarg>
 #include <deque>
+#include <map>
 #include <thread>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 #include "pd-clock-api.h"
+#include "obs/cd-api.h"
 #include "obs/cd-library.h"
 #include "levels.h"
 #include "picker.h"
@@ -51,12 +55,19 @@ struct Deck {
 	bool ready = false;   /* load done: file open, seeked, paused */
 	gs_texrender_t *tr = nullptr;
 	cd::LevelTracker lv;
+	int pol = 0; /* polarity override the tracker was reset with */
+};
+
+struct ClipOverride {
+	bool ban = false;
+	int polarity = 0; /* cd::Polarity */
 };
 
 struct Cfg {
-	std::vector<cd::Folder> folders;
-	std::string folders_key;
-	std::string clock; // "" auto, kClockFree, or "source|filter"
+	std::vector<cd::Folder> folders;               /* with tag / weight / enabled from the settings */
+	std::string folders_key;                       /* folder paths only: a change reloads the library */
+	std::map<std::string, ClipOverride> overrides; /* clip path -> ban / polarity */
+	std::string clock;                             // "" auto, kClockFree, or "source|filter"
 	double sync_ms = 0.0, fallback_bpm = 128.0;
 	cd::PickerConfig pk;
 	cd::SchedulerConfig sc;
@@ -80,6 +91,7 @@ struct CdSource {
 	cd::Transition tr_type = cd::Transition::Cut;
 	double tr_start = 0.0, tr_len = 0.0;
 	bool show_prev = false;
+	bool stutter_on = false;
 
 	double beats = 0.0, bpm = 128.0;
 	bool clock_ok = false, clock_was_ok = false;
@@ -126,6 +138,10 @@ struct CdSource {
 
 	uint64_t cuts = 0;
 	double stat_t = 0.0;
+
+	/* dock event log */
+	std::deque<std::string> log;
+	uint64_t log_seq = 0;
 	double cut_err_sum = 0.0, cut_err_max = 0.0;
 	int cut_err_n = 0;
 };
@@ -148,9 +164,38 @@ cd::Transition tr_from_int(long long v)
 	return v == 1 ? cd::Transition::Crossfade : (v == 2 ? cd::Transition::Dip : cd::Transition::Cut);
 }
 
+/* a folder named like a section plays in that section (until the dock sets a tag) */
+cd::Tag auto_tag(const std::string &path)
+{
+	std::string p = path;
+	while (!p.empty() && (p.back() == '/' || p.back() == '\\'))
+		p.pop_back();
+	const size_t cut = p.find_last_of("/\\");
+	std::string leaf = cut == std::string::npos ? p : p.substr(cut + 1);
+	std::transform(leaf.begin(), leaf.end(), leaf.begin(), [](unsigned char ch) { return (char)std::tolower(ch); });
+	if (leaf.find("breakdown") != std::string::npos)
+		return cd::Tag::Breakdown;
+	if (leaf.find("drop") != std::string::npos)
+		return cd::Tag::Drop;
+	if (leaf.find("groove") != std::string::npos)
+		return cd::Tag::Groove;
+	return cd::Tag::Any;
+}
+
 Cfg read_cfg(obs_data_t *s)
 {
 	Cfg c;
+	/* per-folder tag / weight, keyed by path (the editable list only holds paths) */
+	std::map<std::string, std::pair<int, double>> meta;
+	obs_data_array_t *fm = obs_data_get_array(s, "folder_meta");
+	for (size_t i = 0, n = obs_data_array_count(fm); i < n; ++i) {
+		obs_data_t *it = obs_data_array_item(fm, i);
+		meta[obs_data_get_string(it, "path")] = {(int)obs_data_get_int(it, "tag"),
+							 obs_data_get_double(it, "weight")};
+		obs_data_release(it);
+	}
+	obs_data_array_release(fm);
+
 	obs_data_array_t *arr = obs_data_get_array(s, "folders");
 	const size_t n = obs_data_array_count(arr);
 	for (size_t i = 0; i < n; ++i) {
@@ -160,12 +205,30 @@ Cfg read_cfg(obs_data_t *s)
 			cd::Folder f;
 			f.path = v;
 			f.enabled = !obs_data_has_user_value(it, "hidden") || !obs_data_get_bool(it, "hidden");
+			const auto m = meta.find(f.path);
+			if (m != meta.end()) {
+				f.tag = (cd::Tag)std::clamp(m->second.first, 0, 3);
+				f.weight = std::clamp(m->second.second, 0.0, 10.0);
+			} else {
+				f.tag = auto_tag(f.path);
+			}
 			c.folders.push_back(f);
-			c.folders_key += f.path + (f.enabled ? "|1;" : "|0;");
+			c.folders_key += f.path + ";";
 		}
 		obs_data_release(it);
 	}
 	obs_data_array_release(arr);
+
+	obs_data_array_t *ov = obs_data_get_array(s, "clip_overrides");
+	for (size_t i = 0, m = obs_data_array_count(ov); i < m; ++i) {
+		obs_data_t *it = obs_data_array_item(ov, i);
+		ClipOverride o;
+		o.ban = obs_data_get_bool(it, "ban");
+		o.polarity = std::clamp((int)obs_data_get_int(it, "polarity"), 0, 2);
+		c.overrides[obs_data_get_string(it, "path")] = o;
+		obs_data_release(it);
+	}
+	obs_data_array_release(ov);
 
 	c.clock = obs_data_get_string(s, "clock_source");
 	c.sync_ms = (double)obs_data_get_int(s, "sync_offset_ms");
@@ -400,6 +463,46 @@ const char *clip_name(CdSource *c, int clip)
 	return (clip >= 0 && clip < (int)c->lib.names.size()) ? c->lib.names[clip].c_str() : "?";
 }
 
+/* mx held: one line for the dock log (and the OBS log) */
+void note(CdSource *c, const char *fmt, ...)
+{
+	char buf[512];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	obs_log(LOG_INFO, "'%s': %s", obs_source_get_name(c->self), buf);
+	char ts[16];
+	const double b = c->beats;
+	snprintf(ts, sizeof(ts), "%7.2f  ", b);
+	c->log.push_back(std::string(ts) + buf);
+	if (c->log.size() > 200)
+		c->log.pop_front();
+	c->log_seq++;
+}
+
+/* mx held: folder tags/weights/enabled and clip overrides onto the loaded library */
+void apply_meta(CdSource *c)
+{
+	for (size_t i = 0; i < c->lib.folders.size() && i < c->cfg.folders.size(); ++i)
+		c->lib.folders[i] = c->cfg.folders[i];
+	for (auto &clip : c->lib.clips) {
+		const auto o = c->cfg.overrides.find(clip.path);
+		clip.banned = o != c->cfg.overrides.end() && o->second.ban;
+		clip.polarity = o != c->cfg.overrides.end() ? (cd::Polarity)o->second.polarity : cd::Polarity::Auto;
+	}
+	/* a polarity override on a clip that is showing applies at once */
+	for (int d : {c->live, c->spare}) {
+		if (d < 0 || c->decks[d].clip < 0 || c->decks[d].clip >= (int)c->lib.clips.size())
+			continue;
+		const cd::Clip &clip = c->lib.clips[c->decks[d].clip];
+		if ((int)clip.polarity != c->decks[d].pol) {
+			c->decks[d].lv.reset(clip, c->cfg.lc);
+			c->decks[d].pol = (int)clip.polarity;
+		}
+	}
+}
+
 /* ------------------------------------------------------------------------- */
 /* scheduler events                                                           */
 
@@ -419,6 +522,7 @@ void do_cut(CdSource *c, const cd::SchedEvent &e)
 	const double media_t = obs_source_media_get_time(c->decks[d].src) / 1000.0; /* before un-pausing */
 	obs_source_media_play_pause(c->decks[d].src, false);
 	c->decks[d].lv.reset(c->lib.clips[c->decks[d].clip], c->cfg.lc);
+	c->decks[d].pol = (int)c->lib.clips[c->decks[d].clip].polarity;
 	c->last_obs_ns = 0;
 	const bool fade = e.transition != cd::Transition::Cut && c->spare >= 0 && e.transition_beats > 0.0;
 	c->tr_active = fade;
@@ -432,6 +536,9 @@ void do_cut(CdSource *c, const cd::SchedEvent &e)
 	c->cut_err_max = std::max(c->cut_err_max, std::fabs(err_ms));
 	c->cut_err_n++;
 	const double ready_s = (os_gettime_ns() - c->decks[d].load_ns) / 1e9;
+	note(c, "%s%s '%s' from %.1fs x%.2f%s%s", e.slot == cd::CutScheduler::kDrop ? "DROP " : "",
+	     tr_name(e.transition), clip_name(c, c->decks[d].clip), c->decks[d].inpoint, c->decks[d].speed,
+	     c->decks[d].lv.invert() ? " inverted" : "", c->deferred ? " (late: deck was loading)" : "");
 	obs_log(LOG_INFO,
 		"'%s': CUT #%llu slot %d deck %d '%s' target beat %.3f frame beat %.3f err %+.1f ms %s %.2f "
 		"(ready %.2fs before) in %.1fs (media at %.2fs) x%.2f%s%s inv %d",
@@ -450,6 +557,7 @@ void on_event(CdSource *c, const cd::SchedEvent &e)
 		if (p.clip < 0) {
 			obs_log(LOG_WARNING, "'%s': nothing playable for %s (%s)", obs_source_get_name(c->self),
 				sec_name(e.section), p.reason.c_str());
+			note(c, "nothing playable for %s", sec_name(e.section));
 			return;
 		}
 		const int d = free_deck(c, e.slot);
@@ -480,14 +588,16 @@ void on_event(CdSource *c, const cd::SchedEvent &e)
 		break;
 	}
 	case T::StutterOn:
-		obs_log(LOG_INFO, "'%s': stutter on at beat %.2f", obs_source_get_name(c->self), e.at_beat);
+		c->stutter_on = true;
+		note(c, "stutter on (drop colour cycle)");
 		break;
 	case T::StutterFlip:
 		c->show_prev = e.show_prev && c->spare >= 0;
 		break;
 	case T::StutterOff:
 		c->show_prev = false;
-		obs_log(LOG_INFO, "'%s': stutter off at beat %.2f", obs_source_get_name(c->self), e.at_beat);
+		c->stutter_on = false;
+		note(c, "stutter off");
 		break;
 	}
 }
@@ -558,6 +668,7 @@ void apply(CdSource *c, obs_data_t *settings, bool force_reload)
 	c->cfg = n;
 	if (reload) {
 		c->lib = std::move(lib);
+		apply_meta(c);
 		for (const auto &line : c->lib.notes)
 			obs_log(LOG_INFO, "'%s': %s", obs_source_get_name(c->self), line.c_str());
 		obs_log(LOG_INFO, "'%s': library %zu clips (%d with ingest stats)", obs_source_get_name(c->self),
@@ -571,6 +682,8 @@ void apply(CdSource *c, obs_data_t *settings, bool force_reload)
 		if (c->spare >= 0 && c->decks[c->spare].clip >= (int)c->lib.clips.size())
 			c->spare = -1;
 	} else {
+		apply_meta(c);
+		c->picker->set_library(c->lib.folders, c->lib.clips);
 		c->picker->set_config(c->cfg.pk);
 		c->sched->set_config(c->cfg.sc);
 	}
@@ -1036,3 +1149,213 @@ extern "C" void clip_director_source_load(void)
 	si.icon_type = OBS_ICON_TYPE_MEDIA;
 	obs_register_source(&si);
 }
+
+/* ------------------------------------------------------------------------- */
+/* dock API (cd-api.h)                                                        */
+
+namespace {
+
+CdSource *cd_of(obs_source_t *src)
+{
+	if (!cdapi::is_clip_director(src))
+		return nullptr;
+	return static_cast<CdSource *>(obs_obj_get_data(src));
+}
+
+void clip_info(CdSource *c, int d, cdapi::ClipInfo &o)
+{
+	if (d < 0 || c->decks[d].clip < 0 || c->decks[d].clip >= (int)c->lib.clips.size())
+		return;
+	const Deck &k = c->decks[d];
+	const cd::Clip &clip = c->lib.clips[k.clip];
+	o.valid = true;
+	o.path = clip.path;
+	o.name = c->lib.names[k.clip];
+	o.folder = clip.folder >= 0 && clip.folder < (int)c->lib.folders.size() ? c->lib.folders[clip.folder].path : "";
+	o.thumb = k.clip < (int)c->lib.thumbs.size() ? c->lib.thumbs[k.clip] : "";
+	o.inpoint = k.inpoint;
+	o.speed = k.speed;
+	o.invert = k.lv.invert();
+	o.loops = k.loops;
+	o.ready = k.ready;
+	o.polarity = (int)clip.polarity;
+}
+
+/* edit one entry of an object array in the source settings (creating the array if needed) */
+template<typename F> void edit_array(obs_data_t *settings, const char *key, const std::string &path, F &&fn)
+{
+	obs_data_array_t *arr = obs_data_get_array(settings, key);
+	if (!arr) {
+		arr = obs_data_array_create();
+		obs_data_set_array(settings, key, arr);
+	}
+	obs_data_t *hit = nullptr;
+	for (size_t i = 0, n = obs_data_array_count(arr); i < n && !hit; ++i) {
+		obs_data_t *it = obs_data_array_item(arr, i);
+		if (path == obs_data_get_string(it, "path"))
+			hit = it;
+		else
+			obs_data_release(it);
+	}
+	if (!hit) {
+		hit = obs_data_create();
+		obs_data_set_string(hit, "path", path.c_str());
+		fn(hit);
+		obs_data_array_push_back(arr, hit);
+	} else {
+		fn(hit);
+	}
+	obs_data_release(hit);
+	obs_data_array_release(arr);
+}
+
+} // namespace
+
+namespace cdapi {
+
+bool is_clip_director(obs_source_t *src)
+{
+	const char *id = src ? obs_source_get_unversioned_id(src) : nullptr;
+	return id && strcmp(id, "clip_director_source") == 0;
+}
+
+bool status(obs_source_t *src, Status &o)
+{
+	CdSource *c = cd_of(src);
+	if (!c)
+		return false;
+	std::lock_guard<std::mutex> g(c->mx);
+	o = Status();
+	o.clock_pd = c->clock_ok;
+	o.bpm = c->bpm;
+	o.beats = c->beats;
+	o.section = (int)c->section;
+	o.hold = c->sched && c->sched->hold();
+	o.next_cut_beat = c->sched ? c->sched->next_cut_beat() : 0.0;
+	o.stutter = c->stutter_on;
+	clip_info(c, c->live, o.live);
+	clip_info(c, c->slot_deck[cd::CutScheduler::kNext], o.next);
+	clip_info(c, c->slot_deck[cd::CutScheduler::kDrop], o.drop);
+	std::vector<int> counts(c->lib.folders.size(), 0);
+	for (const auto &clip : c->lib.clips) {
+		if (clip.folder >= 0 && clip.folder < (int)counts.size())
+			counts[clip.folder]++;
+		o.banned += clip.banned ? 1 : 0;
+	}
+	for (size_t i = 0; i < c->lib.folders.size(); ++i) {
+		const cd::Folder &f = c->lib.folders[i];
+		FolderInfo fi;
+		fi.path = f.path;
+		fi.tag = (int)f.tag;
+		fi.weight = f.weight;
+		fi.enabled = f.enabled;
+		fi.clips = counts[i];
+		for (const auto &note_line : c->lib.notes)
+			if (note_line.rfind("folder " + std::to_string(i) + ":", 0) == 0)
+				fi.has_index = note_line.find("ingest index") != std::string::npos;
+		o.folders.push_back(fi);
+	}
+	o.clips = c->lib.clips.size();
+	o.with_stats = c->lib.with_stats;
+	o.cuts = c->cuts;
+	o.cut_err_mean_ms = c->cut_err_n ? c->cut_err_sum / c->cut_err_n : 0.0;
+	o.log_seq = c->log_seq;
+	o.log.assign(c->log.begin(), c->log.end());
+	return true;
+}
+
+void skip(obs_source_t *src)
+{
+	CdSource *c = cd_of(src);
+	if (!c)
+		return;
+	std::lock_guard<std::mutex> g(c->mx);
+	if (c->sched) {
+		c->sched->skip();
+		note(c, "skip (dock)");
+	}
+}
+
+void set_hold(obs_source_t *src, bool hold)
+{
+	CdSource *c = cd_of(src);
+	if (!c)
+		return;
+	std::lock_guard<std::mutex> g(c->mx);
+	if (c->sched && c->sched->hold() != hold) {
+		c->sched->set_hold(hold);
+		note(c, "hold %s", hold ? "on" : "off");
+	}
+}
+
+void ban_live(obs_source_t *src)
+{
+	CdSource *c = cd_of(src);
+	if (!c)
+		return;
+	std::string path, name;
+	{
+		std::lock_guard<std::mutex> g(c->mx);
+		if (c->live < 0 || c->decks[c->live].clip < 0)
+			return;
+		path = c->lib.clips[c->decks[c->live].clip].path;
+		name = c->lib.names[c->decks[c->live].clip];
+		note(c, "banned '%s'", name.c_str());
+		if (c->sched && !c->sched->hold())
+			c->sched->skip();
+	}
+	obs_data_t *st = obs_source_get_settings(src);
+	edit_array(st, "clip_overrides", path, [](obs_data_t *e) { obs_data_set_bool(e, "ban", true); });
+	obs_source_update(src, nullptr);
+	obs_data_release(st);
+}
+
+void set_polarity(obs_source_t *src, const std::string &clip_path, int polarity)
+{
+	CdSource *c = cd_of(src);
+	if (!c || clip_path.empty())
+		return;
+	obs_data_t *st = obs_source_get_settings(src);
+	edit_array(st, "clip_overrides", clip_path,
+		   [&](obs_data_t *e) { obs_data_set_int(e, "polarity", std::clamp(polarity, 0, 2)); });
+	obs_source_update(src, nullptr);
+	obs_data_release(st);
+	std::lock_guard<std::mutex> g(c->mx);
+	note(c, "polarity %s for '%s'", polarity == 1 ? "always invert" : (polarity == 2 ? "never invert" : "auto"),
+	     clip_path.substr(clip_path.find_last_of("/\\") + 1).c_str());
+}
+
+void set_folder(obs_source_t *src, int index, int tag, double weight, bool enabled)
+{
+	CdSource *c = cd_of(src);
+	if (!c)
+		return;
+	obs_data_t *st = obs_source_get_settings(src);
+	obs_data_array_t *arr = obs_data_get_array(st, "folders");
+	std::string path;
+	/* `index` counts non-empty entries, like read_cfg */
+	int k = 0;
+	for (size_t i = 0, n = obs_data_array_count(arr); i < n; ++i) {
+		obs_data_t *it = obs_data_array_item(arr, i);
+		const char *v = obs_data_get_string(it, "value");
+		if (v && *v) {
+			if (k == index) {
+				path = v;
+				obs_data_set_bool(it, "hidden", !enabled);
+			}
+			k++;
+		}
+		obs_data_release(it);
+	}
+	obs_data_array_release(arr);
+	if (!path.empty()) {
+		edit_array(st, "folder_meta", path, [&](obs_data_t *e) {
+			obs_data_set_int(e, "tag", std::clamp(tag, 0, 3));
+			obs_data_set_double(e, "weight", std::clamp(weight, 0.0, 10.0));
+		});
+		obs_source_update(src, nullptr);
+	}
+	obs_data_release(st);
+}
+
+} // namespace cdapi

@@ -1,0 +1,133 @@
+Clip Director 1.0.0 for OBS Studio 32.2.x (Windows x64)
+=======================================================
+
+Clip Director is an OBS source that plays folders of video clips in time with
+the music. It follows Palette Director's beat clock and cuts on the beat,
+shuffles deeply (no clip repeats until the whole pool has played), evens out
+brightness so the set feels consistent, and inverts bright clips so most of
+the picture is black. Its output goes out over Spout to Synesthesia, where
+black reads as transparent.
+
+It adds:
+  - a source "Clip Director"
+  - a dock "Clip Director": what is playing and what is next, the beat, and
+    Skip / Hold / Ban, plus the folder list and the event log.
+
+Needs Palette Director 1.1 or later for the beat clock. With an older
+Palette Director (or none) Clip Director still plays, free-running at a
+fixed BPM.
+
+
+1. Install
+----------
+1. Close OBS.
+2. Palette Director: install 1.1.0 if you have not yet (its zip, same way:
+   replace the folder C:\ProgramData\obs-studio\plugins\palette-director).
+3. Unzip clip-director-1.0.0-windows-x64.zip and copy the folder
+   "clip-director" into
+     C:\ProgramData\obs-studio\plugins\
+   so that these files exist:
+     C:\ProgramData\obs-studio\plugins\clip-director\bin\64bit\clip-director.dll
+     C:\ProgramData\obs-studio\plugins\clip-director\data\effects\cd-composite.effect
+     C:\ProgramData\obs-studio\plugins\clip-director\data\locale\en-US.ini
+4. Start OBS. Help > Log Files > View Current Log should show
+     [clip-director] plugin loaded successfully (version 1.0.0)
+     [palette-director] plugin loaded successfully (version 1.1.0)
+
+
+2. Prepare the clip folders (once per folder, recommended)
+-----------------------------------------------------------
+Clip Director plays any folder of mp4 / mov / mkv / webm files, but raw
+downloads usually have a keyframe only every ~8 s, so jumping to a random
+start point can take longer than a beat. The ingest tool makes a copy that
+cuts cleanly and measures every clip's brightness:
+
+  python tools\cd-ingest.py "D:\Clips\cyber" --dry-run
+  python tools\cd-ingest.py "D:\Clips\cyber"
+
+- Needs Python 3 and ffmpeg on the PATH. It uses the NVIDIA encoder when
+  there is one (about 35 minutes for 264 clips on an RTX 2060).
+- It writes into a "_cd" folder inside the clip folder and never changes
+  the originals (it checks their hashes before and after).
+- It is resumable: run it again after adding clips and only the new ones
+  are encoded.
+- Add the ORIGINAL folder to Clip Director. It finds the "_cd" copy by
+  itself and says so in the log ("from ingest index").
+
+
+3. Add the source
+-----------------
+1. In a scene, Sources > "+" > Clip Director.
+2. Under "Clip folders" add one or more folders.
+3. Clock: "Follow Palette Director" is Auto by default: the Palette Lock on
+   this source, else the first Palette Lock found. Put a Palette Lock on the
+   Clip Director source (or pick the one on your Synesthesia input) so the
+   clips and the palettes change on the same grid.
+4. Output: "Opaque (black background)" is the default and the right one for
+   Synesthesia, which treats transparency as black.
+5. Send it to Synesthesia: right-click the source > Filters > "+" > Spout
+   Filter, and give the sender a name (e.g. CD-Clips). In Synesthesia
+   (Pro licence): Settings > Syphon/Spout Input > CD-Clips, then pick it
+   under Media.
+
+
+4. The Clip Director dock
+-------------------------
+Docks menu > "Clip Director".
+- Top: the source, the clock (PD = following Palette Director, free = not),
+  the section (GROOVE / BREAKDOWN / DROP) and four beat lights, and when the
+  next cut comes.
+- Now playing: thumbnail, clip, folder, start point, speed, inverted or not.
+  - Invert: auto / always / never, saved for that clip.
+  - Ban clip: never play it again (saved), and cut away on the next beat.
+- Next: the clip prepared for the next cut (during a breakdown, the drop
+  clip waiting for the drop).
+- Skip: cut to the next clip on the next beat.
+- Hold: stay on the clip on screen. No cuts and no stutter until released.
+- Folders: turn a folder on or off, set its section and its weight.
+  - Section Any: plays in grooves, and anywhere else nothing is tagged.
+  - Breakdown / Drop: once any folder carries that tag, that section plays
+    only those folders. Groove folders play in grooves (plus Any).
+  - A folder whose name contains "breakdown", "drop" or "groove" starts
+    with that tag.
+  - Weight 0-10: how often the folder is picked relative to the others.
+- Log: every cut, drop, stutter, skip, hold and ban.
+- Footer: clip count, how many have stats and how many are banned, cuts so
+  far and the average cut timing error.
+All of this is saved with the scene collection.
+
+
+5. How it cuts
+--------------
+- Groove: hold 4 bars, cut on the downbeat (25% of cuts are a 1-beat
+  crossfade).
+- Breakdown: hold 8 bars, 4-beat crossfades.
+- Drop: a drop clip is loaded during the breakdown and cuts in on the drop
+  downbeat. When Palette Director runs its drop colour cycle, the picture
+  stutters between the drop clip and the outgoing clip at the same rate.
+- All of this is in the source properties under "Cuts and transitions".
+- Sync offset (Clock group): moves every cut earlier or later by up to
+  200 ms, to line up with your audio monitoring delay.
+- Shuffle group: Seed, and an optional speed range (off by default:
+  100-100%).
+- Even out levels: Strength 0.7 by default. Bright clips (median above the
+  threshold) are inverted. The Advanced controls are rarely needed.
+
+
+6. Troubleshooting
+------------------
+- Clock shows "free": no Palette Lock found, or Palette Director is older
+  than 1.1. Check the log for "clock following Palette Director".
+- Synesthesia does not list the sender: if OBS was force-closed, the old
+  sender name can stay registered and the new one gets "_1" appended. Close
+  OBS normally, or rename the sender in the Spout Filter.
+- "no preview" in the dock: the folder was not ingested (raw clips), which
+  is fine; ingest it for thumbnails, brightness stats and clean cuts.
+- Adding or removing a folder reloads the library; do it before the set,
+  not during it (it can drop a frame or two).
+
+
+7. Uninstall
+------------
+Close OBS and delete C:\ProgramData\obs-studio\plugins\clip-director.
+The "_cd" folders made by the ingest tool can be deleted at any time.

@@ -10,7 +10,8 @@ namespace cdobs {
 struct Library {
 	std::vector<cd::Folder> folders;
 	std::vector<cd::Clip> clips;
-	std::vector<std::string> names; // display names, parallel to clips
+	std::vector<std::string> names;  // display names, parallel to clips
+	std::vector<std::string> thumbs; // thumbnail paths (ingest), "" if none, parallel to clips
 	int with_stats = 0;
 	std::vector<std::string> notes; // one line per folder for the log
 };

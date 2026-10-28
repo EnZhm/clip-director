@@ -29,3 +29,37 @@ add_executable(
 target_include_directories(cd_core_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/doctest)
 target_link_libraries(cd_core_tests PRIVATE cd_core)
 add_test(NAME cd_core_tests COMMAND cd_core_tests)
+
+# P6 integration: Clip Director's scheduler driven by Palette Director's real Director on a WAV
+# fixture. Needs a palette-director checkout next to this repo (or -DCD_PD_ROOT=...); skipped
+# when it is missing (e.g. in CI).
+set(CD_PD_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../palette-director" CACHE PATH "palette-director checkout")
+if(EXISTS "${CD_PD_ROOT}/src/director/director.cpp")
+  set(PDD ${CD_PD_ROOT}/src/director)
+  add_library(
+    cd_pd_director
+    STATIC
+    ${PDD}/director.cpp
+    ${PDD}/analysis.cpp
+    ${PDD}/beat_tracker.cpp
+    ${PDD}/section_state.cpp
+    ${PDD}/scheduler.cpp
+    ${CD_PD_ROOT}/tests/fixtures/gen_fixtures.cpp
+  )
+  target_include_directories(cd_pd_director PRIVATE ${CD_PD_ROOT}/src ${PDD} ${CD_PD_ROOT}/tests/fixtures)
+  add_executable(cd_pd_integration doctest_main.cpp test_pd_stutter.cpp)
+  target_include_directories(
+    cd_pd_integration
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/doctest
+      ${CD_CORE}
+      ${CD_PD_ROOT}/tests
+      ${CD_PD_ROOT}/tests/fixtures
+      ${PDD}
+  )
+  target_link_libraries(cd_pd_integration PRIVATE cd_core cd_pd_director)
+  add_test(NAME cd_pd_integration COMMAND cd_pd_integration)
+  message(STATUS "P6 integration test against ${CD_PD_ROOT}")
+else()
+  message(STATUS "palette-director not found at ${CD_PD_ROOT}: P6 integration test skipped")
+endif()
