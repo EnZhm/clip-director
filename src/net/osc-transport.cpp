@@ -7,6 +7,7 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 using cd_socklen = int;
 #else
 #include <arpa/inet.h>
@@ -147,6 +148,14 @@ bool UdpSocket::open(const std::string &host, int send_port, int recv_port, std:
 	}
 
 	set_timeo(fd_, 100);
+#ifdef _WIN32
+	/* Without this, an ICMP port-unreachable caused by an earlier send (Synesthesia not listening)
+	 * fails the next recvfrom on this socket with WSAECONNRESET. */
+	BOOL report_reset = FALSE;
+	DWORD unused_bytes = 0;
+	WSAIoctl(fd_, SIO_UDP_CONNRESET, &report_reset, static_cast<DWORD>(sizeof(report_reset)), nullptr, 0,
+		 &unused_bytes, nullptr, nullptr);
+#endif
 
 	struct sockaddr_storage ss;
 	std::memset(&ss, 0, sizeof(ss));
