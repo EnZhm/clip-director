@@ -10,12 +10,29 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 enable_testing()
 
 set(CD_CORE ${CMAKE_CURRENT_SOURCE_DIR}/../src/core)
-add_library(cd_core STATIC ${CD_CORE}/picker.cpp ${CD_CORE}/scheduler.cpp ${CD_CORE}/levels.cpp)
-target_include_directories(cd_core PUBLIC ${CD_CORE})
+set(CD_NET ${CMAKE_CURRENT_SOURCE_DIR}/../src/net)
+
+find_package(Threads REQUIRED)
+
+add_library(
+  cd_core
+  STATIC
+  ${CD_CORE}/picker.cpp
+  ${CD_CORE}/scheduler.cpp
+  ${CD_CORE}/levels.cpp
+  ${CD_CORE}/osc.cpp
+  ${CD_CORE}/scene_pool.cpp
+  ${CD_NET}/osc-transport.cpp
+)
+target_include_directories(cd_core PUBLIC ${CD_CORE} ${CD_NET})
+target_link_libraries(cd_core PUBLIC Threads::Threads)
 if(MSVC)
   target_compile_options(cd_core PRIVATE /W4 /WX)
 else()
   target_compile_options(cd_core PRIVATE -Wall -Wextra -Werror)
+endif()
+if(WIN32)
+  target_link_libraries(cd_core PUBLIC ws2_32)
 endif()
 
 add_executable(
@@ -25,6 +42,10 @@ add_executable(
   test_scheduler.cpp
   test_levels.cpp
   test_cyber_set.cpp
+  test_osc.cpp
+  test_scene_pool.cpp
+  test_scene_sched.cpp
+  test_osc_transport.cpp
 )
 target_include_directories(cd_core_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/doctest)
 target_link_libraries(cd_core_tests PRIVATE cd_core)
@@ -47,7 +68,7 @@ if(EXISTS "${CD_PD_ROOT}/src/director/director.cpp")
     ${CD_PD_ROOT}/tests/fixtures/gen_fixtures.cpp
   )
   target_include_directories(cd_pd_director PRIVATE ${CD_PD_ROOT}/src ${PDD} ${CD_PD_ROOT}/tests/fixtures)
-  add_executable(cd_pd_integration doctest_main.cpp test_pd_stutter.cpp)
+  add_executable(cd_pd_integration doctest_main.cpp test_pd_stutter.cpp test_pd_scene_sync.cpp)
   target_include_directories(
     cd_pd_integration
     PRIVATE
