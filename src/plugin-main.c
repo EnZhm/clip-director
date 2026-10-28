@@ -26,6 +26,10 @@ extern void clip_director_source_load(void);
 extern void clip_director_dock_load(void);
 extern void clip_director_syn_hotkeys_load(void);
 extern void clip_director_syn_hotkeys_unload(void);
+extern void clip_director_midi_dock_load(void);
+extern void clip_director_midi_dock_unload(void);
+extern void clip_director_hotkey_load(void);
+extern void clip_director_hotkey_unload(void);
 
 bool obs_module_load(void)
 {
@@ -33,11 +37,15 @@ bool obs_module_load(void)
 	clip_director_source_load();
 	clip_director_dock_load();
 	clip_director_syn_hotkeys_load();
+	clip_director_midi_dock_load();
+	clip_director_hotkey_load();
 	return true;
 }
 
 void obs_module_unload(void)
 {
 	clip_director_syn_hotkeys_unload();
+	clip_director_hotkey_unload();
+	clip_director_midi_dock_unload();
 	obs_log(LOG_INFO, "plugin unloaded");
 }

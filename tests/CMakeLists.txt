@@ -22,6 +22,7 @@ add_library(
   ${CD_CORE}/levels.cpp
   ${CD_CORE}/osc.cpp
   ${CD_CORE}/scene_pool.cpp
+  ${CD_CORE}/midi_map.cpp
   ${CD_NET}/osc-transport.cpp
 )
 target_include_directories(cd_core PUBLIC ${CD_CORE} ${CD_NET})
@@ -46,6 +47,7 @@ add_executable(
   test_scene_pool.cpp
   test_scene_sched.cpp
   test_osc_transport.cpp
+  test_midi_map.cpp
 )
 target_include_directories(cd_core_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/doctest)
 target_link_libraries(cd_core_tests PRIVATE cd_core)
