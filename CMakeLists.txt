@@ -48,11 +48,22 @@ target_sources(
     src/plugin-main.c
     src/obs/cd-source.cpp
     src/obs/cd-library.cpp
+    src/obs/cd-hotkeys.cpp
     src/core/picker.cpp
     src/core/scheduler.cpp
     src/core/levels.cpp
+    src/core/osc.cpp
+    src/core/scene_pool.cpp
+    src/net/osc-transport.cpp
     src/dock/cd-dock.cpp
 )
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE src src/core)
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE src src/core src/net)
+
+# OSC transport threads; on Windows the UDP sockets come from Winsock
+find_package(Threads REQUIRED)
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Threads::Threads)
+if(WIN32)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ws2_32)
+endif()
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})

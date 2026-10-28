@@ -24,16 +24,20 @@ OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 
 extern void clip_director_source_load(void);
 extern void clip_director_dock_load(void);
+extern void clip_director_hotkeys_load(void);
+extern void clip_director_hotkeys_unload(void);
 
 bool obs_module_load(void)
 {
 	obs_log(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);
 	clip_director_source_load();
 	clip_director_dock_load();
+	clip_director_hotkeys_load();
 	return true;
 }
 
 void obs_module_unload(void)
 {
+	clip_director_hotkeys_unload();
 	obs_log(LOG_INFO, "plugin unloaded");
 }
