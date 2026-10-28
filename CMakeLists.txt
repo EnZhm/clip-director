@@ -23,6 +23,11 @@ if(ENABLE_FRONTEND_API)
   target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE ENABLE_FRONTEND_API)
 endif()
 
+# winmm: MIDI input (W4 MIDI Director). Windows only; elsewhere cd-midi-input.cpp is a stub.
+if(WIN32)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE winmm)
+endif()
+
 if(ENABLE_QT)
   find_package(Qt6 COMPONENTS Widgets Core)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets)
@@ -55,7 +60,11 @@ target_sources(
     src/core/osc.cpp
     src/core/scene_pool.cpp
     src/net/osc-transport.cpp
+    src/obs/cd-hotkeys.cpp
+    src/obs/cd-midi-input.cpp
+    src/core/midi_map.cpp
     src/dock/cd-dock.cpp
+    src/dock/midi-director-dock.cpp
 )
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE src src/core src/net)
 
