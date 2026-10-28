@@ -51,7 +51,7 @@ void on_hotkey(void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed)
 
 } // namespace
 
-void clip_director_hotkeys_load(void)
+extern "C" void clip_director_syn_hotkeys_load(void)
 {
 	hk_next = obs_hotkey_register_frontend("cd_syn_next_scene", obs_module_text("Hotkey.SynNextScene"), on_hotkey,
 					       &g_next);
@@ -61,7 +61,7 @@ void clip_director_hotkeys_load(void)
 	obs_log(LOG_INFO, "Synesthesia hotkeys registered (cd_syn_next_scene, cd_syn_hold_scene, cd_syn_bang)");
 }
 
-void clip_director_hotkeys_unload(void)
+extern "C" void clip_director_syn_hotkeys_unload(void)
 {
 	if (hk_next != OBS_INVALID_HOTKEY_ID)
 		obs_hotkey_unregister(hk_next);

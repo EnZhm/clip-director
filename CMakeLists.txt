@@ -48,7 +48,7 @@ target_sources(
     src/plugin-main.c
     src/obs/cd-source.cpp
     src/obs/cd-library.cpp
-    src/obs/cd-hotkeys.cpp
+    src/obs/cd-syn-hotkeys.cpp
     src/core/picker.cpp
     src/core/scheduler.cpp
     src/core/levels.cpp
