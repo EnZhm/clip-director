@@ -1,5 +1,7 @@
 # Clip Director
 
+> **This repository is archived. Clip Director now lives in [EnZhm/director](https://github.com/EnZhm/director)** (`plugins/clip-director`), released as part of [Director 2.0.0](https://github.com/EnZhm/director/releases/tag/2.0.0) together with Music Director, Palette Director, Clip Director and Scene Director. Download and install from there. The releases below stay available as history.
+
 Clip Director is an OBS Studio plugin (Windows x64) for VJ sets. It is an OBS source that
 plays folders of video clips in time with the music: it follows the
 [Palette Director](https://github.com/EnZhm/palette-director) beat clock, cuts on the
